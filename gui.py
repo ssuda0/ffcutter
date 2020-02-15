@@ -8,6 +8,7 @@
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+
 class Ui_main(object):
     def setupUi(self, main):
         main.setObjectName("main")
@@ -18,15 +19,53 @@ class Ui_main(object):
         sizePolicy.setHeightForWidth(main.sizePolicy().hasHeightForWidth())
         main.setSizePolicy(sizePolicy)
         main.setFocusPolicy(QtCore.Qt.StrongFocus)
+        
         self.verticalLayout = QtWidgets.QVBoxLayout(main)
         self.verticalLayout.setContentsMargins(3, 3, 3, 3)
         self.verticalLayout.setSpacing(3)
-        self.verticalLayout.setObjectName("verticalLayout")
+        self.verticalLayout.setObjectName("verticalLayout")        
+        
+        self.horizontalLayout_3 = QtWidgets.QHBoxLayout()
+        self.horizontalLayout_3.setContentsMargins(3, 3, 3, 3)
+        self.horizontalLayout_3.setSpacing(3)
+        self.horizontalLayout_3.setObjectName("horizontalLayout_3")        
+        
         self.video = QtWidgets.QWidget(main)
         self.video.setFocusPolicy(QtCore.Qt.NoFocus)
         self.video.setStyleSheet("background-color: rgb(117, 80, 123);")
         self.video.setObjectName("video")
-        self.verticalLayout.addWidget(self.video)
+        self.horizontalLayout_3.addWidget(self.video)
+        
+        
+#################################################
+#        data = [
+#            {"type": "Fruit", "objects": ["Apple", "Banana"]},
+#            {"type": "Vegetable", "objects": ["Carrot", "Tomato"]s},
+#        ]
+#        self.model = QtGui.QStandardItemModel()
+#        self.model.setHorizontalHeaderLabels(['video name'])
+#        
+#        d = data[0]
+#        item = QtGui.QStandardItem(d["type"])
+#        child = QtGui.QStandardItem(d["objects"][0])  # Apple
+#        item.appendRow(child)
+#        child = QtGui.QStandardItem(d["objects"][1])  # Banana
+#        item.appendRow(child)
+#        self.model.setItem(0, 0, item)
+#        
+#        self.view = QtWidgets.QTreeView()
+#        self.view.setFocusPolicy(QtCore.Qt.NoFocus)
+#        self.view.setObjectName("video_names")
+#        self.view.setEditTriggers(QtWidgets.QAbstractItemView.DoubleClicked)
+#        self.view.setModel(self.model)
+#
+#        self.view.setAnimated(True)
+#        self.view.setFixedWidth(300)
+#        self.horizontalLayout_3.addWidget(self.view)
+##########################################################
+        
+        self.verticalLayout.addLayout(self.horizontalLayout_3)
+        
         self.widget = QtWidgets.QWidget(main)
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         sizePolicy.setHorizontalStretch(0)
@@ -34,6 +73,7 @@ class Ui_main(object):
         sizePolicy.setHeightForWidth(self.widget.sizePolicy().hasHeightForWidth())
         self.widget.setSizePolicy(sizePolicy)
         self.widget.setObjectName("widget")
+        
         self.horizontalLayout_2 = QtWidgets.QHBoxLayout(self.widget)
         self.horizontalLayout_2.setContentsMargins(9, 3, 9, 3)
         self.horizontalLayout_2.setObjectName("horizontalLayout_2")
@@ -47,6 +87,7 @@ class Ui_main(object):
         self.keep.setChecked(True)
         self.keep.setObjectName("keep")
         self.horizontalLayout_2.addWidget(self.keep)
+        
         self.remove = QtWidgets.QRadioButton(self.widget)
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
         sizePolicy.setHorizontalStretch(0)
@@ -58,37 +99,40 @@ class Ui_main(object):
         self.remove.setStatusTip("")
         self.remove.setObjectName("remove")
         self.horizontalLayout_2.addWidget(self.remove)
+        
         self.status = QtWidgets.QLabel(self.widget)
         self.status.setText("")
         self.status.setObjectName("status")
         self.horizontalLayout_2.addWidget(self.status)
+        
         spacerItem = QtWidgets.QSpacerItem(383, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         self.horizontalLayout_2.addItem(spacerItem)
-        self.encode = QtWidgets.QCheckBox(self.widget)
-        self.encode.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.encode.setObjectName("encode")
-        self.horizontalLayout_2.addWidget(self.encode)
-        self.twoPass = QtWidgets.QCheckBox(self.widget)
-        self.twoPass.setCheckable(True)
-        self.twoPass.setChecked(False)
-        self.twoPass.setObjectName("twoPass")
-        self.horizontalLayout_2.addWidget(self.twoPass)
+        
         self.toggleArgsEdit = QtWidgets.QToolButton(self.widget)
         self.toggleArgsEdit.setMinimumSize(QtCore.QSize(0, 23))
         self.toggleArgsEdit.setFocusPolicy(QtCore.Qt.NoFocus)
         self.toggleArgsEdit.setObjectName("toggleArgsEdit")
         self.horizontalLayout_2.addWidget(self.toggleArgsEdit)
+        
         self.print = QtWidgets.QToolButton(self.widget)
         self.print.setMinimumSize(QtCore.QSize(0, 23))
         self.print.setSizeIncrement(QtCore.QSize(10, 0))
         self.print.setFocusPolicy(QtCore.Qt.NoFocus)
         self.print.setObjectName("print")
         self.horizontalLayout_2.addWidget(self.print)
+        
         self.run = QtWidgets.QToolButton(self.widget)
         self.run.setMinimumSize(QtCore.QSize(0, 23))
         self.run.setFocusPolicy(QtCore.Qt.NoFocus)
         self.run.setObjectName("run")
         self.horizontalLayout_2.addWidget(self.run)
+        
+        self.openFile = QtWidgets.QToolButton(self.widget)
+        self.openFile.setMinimumSize(QtCore.QSize(0, 23))
+        self.openFile.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.openFile.setObjectName("open file")
+        self.horizontalLayout_2.addWidget(self.openFile)
+        
         self.verticalLayout.addWidget(self.widget)
         self.argsEdit = QtWidgets.QPlainTextEdit(main)
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Maximum)
@@ -99,6 +143,7 @@ class Ui_main(object):
         self.argsEdit.setMaximumSize(QtCore.QSize(16777215, 90))
         self.argsEdit.setObjectName("argsEdit")
         self.verticalLayout.addWidget(self.argsEdit)
+        
         self.seekbar = QtWidgets.QWidget(main)
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         sizePolicy.setHorizontalStretch(0)
@@ -134,17 +179,21 @@ class Ui_main(object):
         main.setWindowTitle(_translate("main", "ffcutter"))
         self.keep.setText(_translate("main", "Keep"))
         self.remove.setText(_translate("main", "Remove"))
-        self.encode.setText(_translate("main", "Encode"))
-        self.twoPass.setText(_translate("main", "2-pass"))
         self.toggleArgsEdit.setToolTip(_translate("main", "Show/hide ffmpeg arguments editor"))
         self.toggleArgsEdit.setText(_translate("main", "Edit Args"))
         self.toggleArgsEdit.setShortcut(_translate("main", "E"))
         self.print.setToolTip(_translate("main", "Print ffmpeg commands into terminal"))
         self.print.setText(_translate("main", "Print"))
         self.print.setShortcut(_translate("main", "P"))
+        
         self.run.setToolTip(_translate("main", "Run ffmpeg commands."))
         self.run.setText(_translate("main", "Run"))
         self.run.setShortcut(_translate("main", "R"))
+        
+        self.openFile.setToolTip(_translate("main", "Open File ffmpeg commands."))
+        self.openFile.setText(_translate("main", "Open File"))
+        self.openFile.setShortcut(_translate("main", "Open File"))
+        
         self.argsEdit.setPlainText(_translate("main", "out: \n"
 "# FFmpeg output arguments.\n"
 "out-args: \n"
