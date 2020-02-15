@@ -8,17 +8,15 @@ import locale
 import subprocess
 import collections
 import tempfile
-import itertools
 import shutil
 import json
-import traceback
 import hashlib
-import threading
 
 import colorama
 from docopt import docopt
 from PyQt5 import QtGui, QtCore, QtWidgets
 from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QFileDialog
 
 from mpv import MPV
 from gui import Ui_main, Ui_shiftDialog
@@ -27,6 +25,7 @@ from gui import Ui_main, Ui_shiftDialog
 doc = """ffcutter
 
 Usage:
+    ffcutter
     ffcutter <video-file> [-s <save-file> --mpv=mpv-option...]
     ffcutter -h | --help
 
@@ -54,19 +53,15 @@ GUI keys:
     space - Play/pause.
     arrows - Step frames.
     ctrl + arrows - Step seconds.
-    shift + arrows - Jump keyframes.
     alt + arrows - Jump anchors.
     up/down arrows - Step 5%.
-    [] - Jump chapters if any.
 
     z - Put anchor on the current playback position.
     x - Remove highlighted anchor.
 
     h - Print this help message to the terminal.
     i - Print input file information to the terminal.
-    k - Show keyframes on the seekbar.
 
-    o - Open resulted file.
     ctrl + o - Open its directory.
 
     f - Input frame start/end shift which will be applied to all segments during encoding / stream copy.
@@ -87,17 +82,23 @@ class GUI(QtWidgets.QDialog):
     frameindex_built = QtCore.pyqtSignal()
     shell_message = QtCore.pyqtSignal(str)
 
-    def __init__(self, filename, save_filename=None, mpv_options=[], skip_index=False):
+    def __init__(self, filename=None, save_filename=None, mpv_options=[], skip_index=False):
         super().__init__()
-
         self.filename = filename
-        self.save_filename = save_filename or os.path.split(filename)[1] + '.ffcutter'
+        self.save_filename = save_filename
         self.mpv_options = mpv_options
 
+        self.initialize_ui()
+            
+    def initialize_ui(self):
+        self.segments = []
+        self.save_file_path = None
+        self.frame_total = None
+        self.frame_num = None
+        
         self.hover_cursor = None # mouse position on the seek seekbar
         self.playback_pos = None
         self.playback_len = None
-        self.segments = []
         self.anchor = None # single anchor position that hasn't become a segment
         self.closest_anchor = None # self.anchor or anchor closest to playback_pos
 
@@ -110,35 +111,33 @@ class GUI(QtWidgets.QDialog):
         self.ipts = []
         self.ffmpeg_shift_a = 0
         self.ffmpeg_shift_b = 0
-
-        self.tmpdir = os.path.join(tempfile.gettempdir(), 'ffcutter')
-        try:
-            os.mkdir(self.tmpdir)
-        except FileExistsError:
-            pass
-        except Exception:
-            self.tmpdir = tempfile.gettempdir()
-
-        colorama.init()
-
+        
         # set up the user interface from Designer
         self.ui = Ui_main()
         self.ui.setupUi(self)
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
-        self.setWindowTitle('ffcutter - ' + os.path.split(filename)[-1])
+        self.setWindowTitle('ffcutter')
         self.setFocus(True)
-
-        self.ui.remove.toggled.connect(self.save_state)
-        self.ui.keep.toggled.connect(self.save_state)
-        self.ui.twoPass.toggled.connect(self.save_state)
-        self.ui.encode.toggled.connect(self.save_state)
+        
         self.ui.print.clicked.connect(self.print_ffmpeg)
         self.ui.run.clicked.connect(self.run_ffmpeg)
+        
+        def open_file():
+            fname = QFileDialog.getOpenFileName(self)
+            self.filename = fname[0]
+            self.save_filename = os.path.split(self.filename)[1] + '.ffcutter'
+            if self.filename != '':    
+                self.execute_file()
+                                   
+        self.ui.openFile.clicked.connect(open_file)   
 
+        self.ui.print.setEnabled(False)
+        self.ui.run.setEnabled(False)
+        
         editor = self.ui.argsEdit
         text = editor.toPlainText()
 
-        outfile = self.get_user_ffmpeg_args()[0]
+        outfile = ' '
         text = re.sub(r'out:[^\S\n]*\n', 'out: %s\n' % outfile, text)
         editor.setPlainText(text)
 
@@ -148,12 +147,7 @@ class GUI(QtWidgets.QDialog):
                 editor.setFocus(True)
 
         editor.hide()
-        editor.textChanged.connect(self.save_state)
         self.ui.toggleArgsEdit.clicked.connect(toggle_editor)
-
-        self.ui.twoPass.setEnabled(False)
-        self.ui.encode.toggled.connect(lambda: self.ui.twoPass.setEnabled(self.ui.encode.isChecked()))
-
         self.statusbar_update.connect(self.update_statusbar)
 
         self.seekbar_pressed = False
@@ -166,12 +160,279 @@ class GUI(QtWidgets.QDialog):
         self.refresh_statusbar_timer = QtCore.QTimer(self)
         self.refresh_statusbar_timer.setInterval(300)
         self.refresh_statusbar_timer.timerEvent = lambda _: self.update_statusbar()
+        self.show()
+         
+        # check if necessary binaries are present
+        self.ffmpeg_bin = 'ffmpeg'
+        self.ffprobe_bin = 'ffprobe'
+        self.interrupted = False
+        
+        if getattr(sys, 'frozen', False):
+            dirname = os.path.split(sys.executable)[0]
+            self.ffmpeg_bin = os.path.join(dirname, 'ffmpeg.exe')
+            self.ffprobe_bin = os.path.join(dirname, 'ffprobe.exe')
+        elif os.name == 'nt':
+            dirname = os.path.split(__file__)[0]
+            self.ffmpeg_bin = os.path.join(dirname, 'ffmpeg.exe')
+            self.ffprobe_bin = os.path.join(dirname, 'ffprobe.exe')
+
+        
+        self.directory = getattr(sys, '_MEIPASS', os.path.abspath('.'))
+        self.ffmpeg_bin = os.path.join(self.directory, 'ffmpeg.exe')
+        self.ffprobe_bin = os.path.join(self.directory, 'ffprobe.exe')
+        print(self.directory)
+        
+        if not shutil.which(self.ffmpeg_bin):
+            self.print_error('FFmpeg weren\'t found.')
+            self.ui.run.setEnabled(False)
+            self.ffmpeg_bin = None
+        if not shutil.which(self.ffprobe_bin):
+            self.print_error('FFprobe weren\'t found. Wont be able to build frame index.')
+            self.ffprobe_bin = None    
+    
+    
+    # Read a file choosed #########################################################################
+    ###############################################################################################
+    
+    def execute_file(self):
+        self._, self.ext= os.path.splitext(self.filename)
+                        
+        if self.ext == ".txt" :
+            self.execute_text_file()
+        else :
+            self.load_file()   
+            
+    def execute_text_file(self):
+        self.scene_list = []
+        with open(self.filename, 'rb') as fp:
+            for line in fp:
+                self.scene_list.append(line.decode('utf-8'))
+        command_list = []
+        for i, line in enumerate(self.scene_list):
+            line_args = line.split()
+            line_args[2] = int(line_args[2])
+            line_args[3] = int(line_args[3])       
+            video_segment = [line_args[0], line_args[1], line_args[2], line_args[3]]
+            command_list.append(self.make_ffmpeg_command(video_segment))
+        
+        if not command_list == []:
+            self.run_ffmpeg(commands = command_list)
+        else :
+            print("Input file doesn't have a proper form")
+        
+        
+    def make_ffmpeg_command(self, video_segment):
+        input_file = video_segment[0]        
+        infile_name, ext = os.path.splitext(os.path.split(input_file)[1])
+        if ext == '' :
+            input_file = os.path.join(input_file ,self.get_infile_path(input_file))
+
+        cmd = [self.ffprobe_bin] + [' -v 0 -of csv=p=0 -select_streams v:0 -show_entries stream=r_frame_rate '] + [input_file]
+        cmd = "".join(map(str, cmd))
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        cmdout, err = proc.communicate()
+        frame_duration = 1/float(eval(cmdout.decode("utf-8").rstrip()))
+        
+        outfile_path = video_segment[1]
+        if not os.path.exists(outfile_path):
+            os.mkdir(outfile_path)
+        
+        infile_name, _ext = os.path.splitext(os.path.split(input_file)[1])
+        start = video_segment[2]
+        end = video_segment[3]
+        tmpfile = '%s.part%d-%d%s' % (infile_name, start, end, _ext)
+        if ext == '':
+            self.save_data_file(video_segment, tmpfile)
+        tmpfile = os.path.join(outfile_path, tmpfile)
+
+            
+        
+
+        ffmpeg = self.ffmpeg_bin or 'ffmpeg'
+        start = start*frame_duration 
+        end = end*frame_duration + frame_duration
+
+        command = [ffmpeg, '-i', input_file, '-y', '-ss', str(start), '-to', str(end), '-c', 'copy', tmpfile]
+        
+        return command
+    
+    # Save data file ##############################################################################
+    ###############################################################################################
+    
+    def get_cmd_option(self, filename, option):
+        with open(filename, 'rb') as fp:
+            for line in fp:
+                line = line.decode()
+                if line.find(option) != -1 :
+                    line = line.replace(option, "", 1)
+                    line = line.replace("\r\n", "", 1)
+                    return line
+    
+    def get_infile_path(self, infile_path):
+        metainfo_file = os.path.join(infile_path, "metainfo.txt")
+        cam_filename = self.get_cmd_option(metainfo_file, "cam=")
+        return cam_filename
+    
+    def save_data_file(self, segment, video_filename):
+        infile_path = segment[0]
+        outfile_path = segment[1]
+        if not os.path.exists(outfile_path):
+            os.mkdir(outfile_path)
+        
+        start = segment[2]
+        end = segment[3]
+        
+        metainfo_file = os.path.join(infile_path, "metainfo.txt")
+
+        
+        def save_can_print_out():
+            inputdata_file, outputdata_file = get_in_out_file("sync=")
+            
+            f_in = open(inputdata_file, 'r')
+            f_out = open(outputdata_file, 'w')
+            
+            f_out.write(f_in.readline())
+            for i in range(0, start-1):
+                f_in.readline()
+                
+            for i in range(start-1, end):
+                line = f_in.readline()   
+                line = line.replace(str(i), str(i- start + 1), 1)
+                line_split = line.split(",")
+                idx_time_parsing_line = line_split[0:2]
+                data_parsing_line = list(map(int, line_split[2:]))                
+
+                if i==start-1:
+                    self.min_canidx = min(x for x in data_parsing_line if x > 0) - 1
+                elif i==end-1:
+                    self.max_canidx = max(x for x in data_parsing_line if x > 0)                
+
+                for i in range(len(data_parsing_line)):
+                    if data_parsing_line[i] > 0 :
+                        data_parsing_line[i] -= self.min_canidx
+                
+                data_line = ", ".join(str(x) for x in data_parsing_line) + "\n"
+                idx_time_line = ", ".join(str(x) for x in idx_time_parsing_line) + ", "
+                
+                line = idx_time_line + data_line
+                f_out.write(line)
+        
+            f_in.close()
+            f_out.close()            
+            write_meta("sync="+os.path.split(outputdata_file)[1]+"\n")
+
+            
+        def save_dc_merged():
+            inputdata_file, outputdata_file = get_in_out_file("dgps_car=")  
+            
+            f_in = open(inputdata_file, 'r')
+            f_out = open(outputdata_file, 'w')
+            
+            for i in range(0, self.min_canidx):
+                f_in.readline()
+            for i in range(self.min_canidx, self.max_canidx+1):
+                line = f_in.readline()
+                line = line.replace(str(i), str(i-self.min_canidx), 1)
+                f_out.write(line)
+            
+            f_in.close()
+            f_out.close()
+            write_meta("dgps_car="+os.path.split(outputdata_file)[1]+"\n")
+        
+        def save_cam_params():
+            cam_params_filename = self.get_cmd_option(metainfo_file, "cam_params=")
+            inputdata_file = os.path.join(infile_path, cam_params_filename)
+            outputdata_file = os.path.join(outfile_path, cam_params_filename)      
+            shutil.copyfile(inputdata_file, outputdata_file)
+            write_meta("cam_params="+os.path.split(outputdata_file)[1]+"\n")
+             
+                    
+        def get_in_out_file(option):
+            filename = self.get_cmd_option(metainfo_file, option)
+            
+            inputdata_filename = os.path.join(infile_path, filename)
+            filename, ext = os.path.splitext(filename)
+            outputdata_filename = '%s.ffcutter.part%d-%d.txt' % (filename, start , end)
+            outputdata_filename = os.path.join(outfile_path, outputdata_filename)
+            
+            return inputdata_filename, outputdata_filename
+        
+        def write_meta(line):
+            outputdata_file = os.path.join(outfile_path, "metainfo.txt")
+            f_out = open(outputdata_file, 'a')
+            f_out.write(line)
+            f_out.close()
+        
+        
+        outputdata_file = os.path.join(outfile_path, "metainfo.txt")
+        open(outputdata_file, 'w').write("cam="+video_filename+"\n")
+        save_can_print_out()
+        save_dc_merged()
+        save_cam_params()
+        
+    
+    # Load video file #############################################################################
+    ###############################################################################################    
+
+    def load_file(self):   
+        self.ui.horizontalLayout_3.removeWidget(self.ui.video)
+        self.ui.video = QtWidgets.QWidget()
+        self.ui.video.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.ui.video.setStyleSheet("background-color: rgb(117, 80, 123);")
+        self.ui.video.setObjectName("video")
+        self.ui.horizontalLayout_3.addWidget(self.ui.video)
+        
+        self.segments = []
+        self.save_file_path = None
+        self.frame_total = None
+        self.frame_num = None
+        
+        self.hover_cursor = None # mouse position on the seek seekbar
+        self.playback_pos = None
+        self.playback_len = None
+        self.anchor = None # single anchor position that hasn't become a segment
+        self.closest_anchor = None # self.anchor or anchor closest to playback_pos
+
+        self.state_loaded = False
+
+        self.show_keyframes = False
+        self.running_ffmpeg = False
+
+        self.pts = []
+        self.ipts = []
+        self.ffmpeg_shift_a = 0
+        self.ffmpeg_shift_b = 0
+        ##################################################
+        
+        self.ui.print.setEnabled(True)
+        self.ui.run.setEnabled(True)
+ 
+        self.save_filename = os.path.split(self.filename)[1] + '.ffcutter'
+        self.setWindowTitle('ffcutter - ' + os.path.split(self.filename)[-1])
+        
+        if self.save_file_path is None :
+            self.save_file_path = os.path.split(self.filename)[0]
+        
+        self.tmpdir = os.path.join(tempfile.gettempdir(), 'ffcutter')
+        try:
+            os.mkdir(self.tmpdir)
+        except FileExistsError:
+            pass
+        except Exception:
+            self.tmpdir = tempfile.gettempdir()
+
+        colorama.init()
+
+        editor = self.ui.argsEdit
+        text = editor.toPlainText()
+        outfile = self.get_user_ffmpeg_args()[0]
+        text = re.sub(r'out:[^\S\n]*\n', 'out: %s\n' % outfile, text)
+        editor.setPlainText(text)
 
         def set_shifts():
             self.ffmpeg_shift_a = wrapper.a.value()
             self.ffmpeg_shift_b = wrapper.b.value()
-            self.save_state()
-
+            
         dialog = QtWidgets.QDialog(self)
         wrapper = Ui_shiftDialog()
         wrapper.setupUi(dialog)
@@ -183,56 +444,82 @@ class GUI(QtWidgets.QDialog):
         self.shifts_dialog = dialog
         self.shifts_dialog_ui = wrapper
         self.shifts_dialog_ui.suggestion.hide()
+        
+        self.show()
+        self.init_player()
 
-        # check if necessary binaries are present
-
-        self.ffmpeg_bin = 'ffmpeg'
-        self.ffprobe_bin = 'ffprobe'
-
-        if getattr(sys, 'frozen', False):
-            dirname = os.path.split(sys.executable)[0]
-            self.ffmpeg_bin = os.path.join(dirname, 'ffmpeg.exe')
-            self.ffprobe_bin = os.path.join(dirname, 'ffprobe.exe')
-        elif os.name == 'nt':
-            dirname = os.path.split(__file__)[0]
-            self.ffmpeg_bin = os.path.join(dirname, 'ffmpeg.exe')
-            self.ffprobe_bin = os.path.join(dirname, 'ffprobe.exe')
-
-        if not shutil.which(self.ffmpeg_bin):
-            self.print_error('FFmpeg weren\'t found.')
-            self.ui.run.setEnabled(False)
-            self.ffmpeg_bin = None
-        if not shutil.which(self.ffprobe_bin):
-            self.print_error('FFprobe weren\'t found. Wont be able to build frame index.')
-            self.ffprobe_bin = None
-
-        # get frames timestamps and find keyframes
-        # inside separate thread because long blocking calls crash qt application
-
-        def on_frameindex_built():
-            self.show()
-            self.init_player()
-
-        if not self.ffprobe_bin or skip_index:
-            on_frameindex_built()
-        else:
-            self.frameindex_built.connect(on_frameindex_built)
-            threading.Thread(target=self.load_ffmpeg_frames_info).start()
-
-        # SIGINT handling trickery
-
+        # SIGINT handling trickery    
         timer = QtCore.QTimer(self)
         timer.timerEvent = lambda _: None
         timer.start(1000)
         self.interrupted = False
-
+        
+        
     def interrupt(self):
         if self.running_ffmpeg:
             self.interrupted = True
         else:
             self.print('Exiting gracefully.')
             QtWidgets.QApplication.quit()
+    
+    # Player #################################################################################
+    ###############################################################################################
 
+    def init_player(self):
+        def mpv_log(loglevel, component, message):
+            self.print('Mpv log: [{}] {}: {}'.format(loglevel, component, message))
+        
+        mpv_args = []
+        mpv_kw = {
+            'wid': int(self.ui.video.winId()),
+            'keep-open': 'yes',
+            'rebase-start-time': 'no',
+            'framedrop': 'no',
+            'osd-level': '2',
+            'osd-fractions': 'yes',
+        }
+        for opt in self.mpv_options:
+            if '=' in opt:
+                k, v = opt.split('=', 1)
+                mpv_kw[k] = v
+            else:
+                mpv_args.append(opt)
+
+        
+        player = MPV(*mpv_args, log_handler=mpv_log, **mpv_kw)
+        self.player = player
+        player.pause = True
+
+        def on_player_loaded():
+            if self.ffmpeg_bin:
+                self.check_ffmpeg_seek_problem()
+            self.ui.loading.hide()
+            self.state_loaded = True
+
+        def on_playback_len(s):
+            self.playback_len = s
+            player.unobserve_property('duration', on_playback_len)
+
+        def on_playback_pos(s):
+            player.observe_property('estimated-frame-number', on_framenum_count)
+            if self.playback_pos is None:
+                self.player_loaded.emit()
+            self.playback_pos = s
+            self.statusbar_update.emit()
+            self.ui.seekbar.update()
+            
+        def on_framenum_count(s):
+            self.frame_num = s
+            
+        def on_frametotal_total(s):
+            self.frame_total = s
+            
+        self.player_loaded.connect(on_player_loaded)
+        player.observe_property('estimated-frame-count', on_frametotal_total)         
+        player.observe_property('time-pos', on_playback_pos)
+        player.observe_property('duration', on_playback_len)
+        player.play(self.filename)
+        
     def check_ffmpeg_seek_problem(self):
         self.print('Testing if ffmpeg stream copy seeking on this file works correctly...')
 
@@ -242,15 +529,48 @@ class GUI(QtWidgets.QDialog):
                     os.remove(f)
                 except Exception:
                     pass
-
+        
+        def find_global_frame_shift():
+            cmd = [self.ffprobe_bin, self.filename] + '-show_frames -show_packets -select_streams v -print_format json=c=1 -v error'.split()
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+            pts = []
+            while True:
+                line = proc.stdout.readline().decode()
+                if not line:
+                    break
+                elif '"frame"' in line:
+                    break
+    
+                if '"packet"' in line and line.startswith('        {'):
+                    packet = json.loads(line.strip()[:-1])
+                    t = packet.get('dts_time', packet.get('pts_time', None))
+                    if t is None:
+                        return
+                    pts.append(float(t))
+    
+            proc.terminate()
+    
+            q = collections.deque(maxlen=10)
+            for t in sorted(set(pts)):
+                rm = []
+                for v in q:
+                    if abs(v-t) <= 0.002:
+                        rm.append(v)
+                for v in rm:
+                    q.remove(v)
+                    pts.remove(v)
+    
+            if len(pts) > 1:
+                label = self.shifts_dialog_ui.suggestion
+                label.show()
+                label.setText('%s -%s -%s' % (label.text(), len(pts)-1, len(pts)-1))
+                
         first_frame1 = os.path.join(self.tmpdir, 'sample1.png')
         tmpfile = os.path.join(self.tmpdir, 'sample2' + os.path.splitext(self.filename)[1])
         first_frame2 = os.path.join(self.tmpdir, 'sample2.png')
-
         errmsg = 'Failed testing ffmpeg.'
 
         # get frame with encoding on
-
         cmd = [self.ffmpeg_bin] + '-i FILE -y -frames 1 -v error'.split() + [first_frame1]
         cmd[2] = self.filename
         proc = subprocess.Popen(cmd)
@@ -259,20 +579,16 @@ class GUI(QtWidgets.QDialog):
             return
 
         # get frame with encoding off and try to find offset
-
         # stream copy 1 frame video
-
         cmd = [self.ffmpeg_bin] + '-i FILE -y -ss TIME -c copy -frames 1 -v error'.split() + [tmpfile]
         cmd[2] = self.filename
         cmd[5] = str(self.playback_pos)
-
         proc = subprocess.Popen(cmd)
         if self._wait(proc, errmsg):
             clean()
             return
 
         # get that video first frame
-
         cmd = [self.ffmpeg_bin] + '-i -y -frames 1 -v error'.split() + [first_frame2]
         cmd.insert(2, tmpfile)
         proc = subprocess.Popen(cmd)
@@ -284,7 +600,7 @@ class GUI(QtWidgets.QDialog):
             hash1 = hashlib.md5(frame1.read()).hexdigest()
             hash2 = hashlib.md5(frame2.read()).hexdigest()
             if hash1 != hash2:
-                self.find_global_frame_shift()
+                find_global_frame_shift()
                 self.print_error('FFmpeg stream copy seeking seem to work incorrectly.\n' +
                                  '    No-encode mode will most likely be inaccurate.\n' +
                                  '    Use F key to adjust global offsets.')
@@ -293,233 +609,32 @@ class GUI(QtWidgets.QDialog):
 
         clean()
 
-    def find_global_frame_shift(self):
-        cmd = [self.ffprobe_bin, self.filename] + '-show_frames -show_packets -select_streams v -print_format json=c=1 -v error'.split()
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-        pts = []
-        while True:
-            line = proc.stdout.readline().decode()
-            if not line:
-                break
-            elif '"frame"' in line:
-                break
-
-            if '"packet"' in line and line.startswith('        {'):
-                packet = json.loads(line.strip()[:-1])
-                t = packet.get('dts_time', packet.get('pts_time', None))
-                if t is None:
-                    return
-                pts.append(float(t))
-
-        proc.terminate()
-
-        q = collections.deque(maxlen=10)
-        for t in sorted(set(pts)):
-            rm = []
-            for v in q:
-                if abs(v-t) <= 0.002:
-                    rm.append(v)
-            for v in rm:
-                q.remove(v)
-                pts.remove(v)
-
-        if len(pts) > 1:
-            label = self.shifts_dialog_ui.suggestion
-            label.show()
-            label.setText('%s -%s -%s' % (label.text(), len(pts)-1, len(pts)-1))
-
-    def update_statusbar(self):
-        if self.playback_pos is None:
-            return
-
-        seeking = self.player.seeking
-        text = '<pre>{}{}{}</pre>'.format(
-            'K ' if self.player.video_frame_info['picture-type'] == 'I' else '  ',
-            format_time(floor(self.playback_pos, 3), full=True),
-            ' ... ' if seeking else '',
-            )
-
-        if seeking and not self.refresh_statusbar_timer.isActive():
-            self.refresh_statusbar_timer.start()
-        elif not seeking and self.refresh_statusbar_timer.isActive():
-            self.refresh_statusbar_timer.stop()
-
-        self.ui.status.setText(text)
-
-    # Frame index #################################################################################
-    ###############################################################################################
-
     def _wait(self, proc, msg='Failed executing command.'):
         if proc.wait() != 0:
             self.print_error('%s\n' % msg +
                              '    Command: %s\n' % ' '.join(proc.args) +
                              '    Exit code: %s' % proc.returncode)
         return proc.returncode
-
-    def load_ffmpeg_frames_info(self):
-        # get frames timestamps and find keyframes
-        # (if this look like nonsense to you, sorry, I'm not very good in video processing)
-
-        index_file = '%s.%s.frames' % (os.path.split(self.filename)[1], os.path.getsize(self.filename))
-        index_file = os.path.join(self.tmpdir, index_file)
-
-        if os.path.exists(index_file):
-            self.print('Frames index loaded from %s' % index_file)
-            with open(index_file) as f:
-                self.pts, self.ipts = json.load(f)
-        else:
-            self.print('Building video frames index.')
-            ret = self._load_timestamps_from_packets()
-            if not ret:
-                self.print('Building video frames index in full mode.')
-                ret = self._load_timestamps_from_frames()
-
-            if not ret:
-                self.print_error('Filed building frames index.')
-            else:
-                self.pts, self.ipts = ret
-                with open(index_file, 'w') as f:
-                    json.dump([self.pts, self.ipts], f)
-
-        self.frameindex_built.emit()
-
-    def _load_timestamps_from_frames(self):
-
-        # get video duration to be able to show progress
-
-        frames_len = None
-
-        cmd = [self.ffmpeg_bin] + '-i -c copy -f null'.split() + [os.devnull]
-        cmd.insert(2, self.filename)
-        proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
-        out = proc.stderr.read().decode()
-        matches = re.findall(r'frame=\s*(\d+)', out)
-        if matches:
-            frames_len = int(matches[-1])
-
-        # start the building process
-
-        cmd = [self.ffprobe_bin, self.filename] + '-show_frames -show_entries frame=best_effort_timestamp_time,pict_type -select_streams v -v error'.split()
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-
-        def progress(n):
-            msg = '\rProcessed: %s/%s' % (n, frames_len or '?')
-            if frames_len:
-                msg += ' (%d%%)' % (n/(frames_len/100))
-            self.print(msg, end='')
-
-        n = 0
-        pts = []
-        ipts = []
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-
-            if b'best_effort_timestamp_time=' in line:
-                try:
-                    pts.append(float(line.split(b'=')[1]))
-                except Exception:
-                    pass
-                n += 1
-                if n % 100 == 0:
-                    progress(n)
-            elif b'pict_type=I\n' == line:
-                ipts.append(pts[-1])
-
-        progress(n)
-        self.print()
-
-        if self._wait(proc, 'Failed building frames index.'):
+    
+    def update_statusbar(self):
+        if self.playback_pos is None:
             return
 
-        if pts:
-            return pts, ipts
+        seeking = self.player.seeking
+        text = '<pre>{}{}{} (frame:{})</pre>'.format(
+                'K ' if self.player.video_frame_info['picture-type'] == 'I' else '  ',
+                format_time(floor(self.playback_pos, 3), full=True),
+                ' ... ' if seeking else '',
+                f'{self.frame_num}/{self.frame_total}',
+            ) 
+        
+        if seeking and not self.refresh_statusbar_timer.isActive():
+            self.refresh_statusbar_timer.start()
+        elif not seeking and self.refresh_statusbar_timer.isActive():
+            self.refresh_statusbar_timer.stop()
+        self.ui.status.setText(text)
 
-    def _load_timestamps_from_packets(self):
-
-        # get first frame timestamp reliably
-        first_frame = None
-        cmd = [self.ffprobe_bin, self.filename] + '-show_frames -show_entries frame=best_effort_timestamp_time -select_streams v -v error'.split()
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            if b'=' in line:
-                try:
-                    first_frame = float(line.split(b'=')[1])
-                except Exception:
-                    pass
-                break
-        proc.terminate()
-
-
-        cmd = [self.ffprobe_bin, self.filename] + '-show_packets -show_entries packet=pts_time,dts_time,flags -select_streams v -v error'.split()
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-
-        pts = []
-        dts = []
-        ipts = []
-        packetn = 0
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-
-            if b'=K' in line:
-                # prefer pts
-                try:
-                    ipts.append(pts[packetn-1])
-                except IndexError:
-                    try:
-                        ipts.append(dts[packetn-1])
-                    except IndexError:
-                        pass
-            elif line[1:9] == b'ts_time=':
-                if line.startswith(b'p'):
-                    packetn += 1
-
-                v = line.split(b'=')[1]
-                try:
-                    v = float(v)
-                    if v >= 0:
-                        if line.startswith(b'p'):
-                            pts.append(v)
-                        else:
-                            dts.append(v)
-                except ValueError:
-                    pass
-
-        if self._wait(proc, 'Failed building frames index.'):
-            return
-
-        pts = [t for t in sorted(set(pts + dts))]
-        ipts = [t for t in sorted(set(ipts))]
-
-        # remove packets before first frame
-        if first_frame:
-            pts = list(itertools.dropwhile(lambda t: t < first_frame, pts))
-
-        # filter out pts of incomplete packets
-        q = collections.deque(maxlen=10)
-        for t in sorted(set(pts)):
-            rm = []
-            for v in q:
-                if abs(v-t) <= 0.002:
-                    rm.append(v)
-            for v in rm:
-                q.remove(v)
-                pts.remove(v)
-                try:
-                    ipts[ipts.index(v)] = t
-                except Exception:
-                    pass
-
-        if pts:
-            return pts, ipts
-
-    # Info messages ###############################################################################
+    # Print info messages #########################################################################
     ###############################################################################################
 
     def print(self, *args, **kw):
@@ -566,59 +681,7 @@ class GUI(QtWidgets.QDialog):
                     sep('AUDIO')
                 self.print(line)
         self.print()
-
-    # Player ######################################################################################
-    ###############################################################################################
-
-    def init_player(self):
-
-        def mpv_log(loglevel, component, message):
-            self.print('Mpv log: [{}] {}: {}'.format(loglevel, component, message))
-
-        mpv_args = []
-        mpv_kw = {
-            'wid': int(self.ui.video.winId()),
-            'keep-open': 'yes',
-            'rebase-start-time': 'no',
-            'framedrop': 'no',
-            'osd-level': '2',
-            'osd-fractions': 'yes',
-        }
-        for opt in self.mpv_options:
-            if '=' in opt:
-                k, v = opt.split('=', 1)
-                mpv_kw[k] = v
-            else:
-                mpv_args.append(opt)
-
-        player = MPV(*mpv_args, log_handler=mpv_log, **mpv_kw)
-        self.player = player
-        player.pause = True
-
-        def on_player_loaded():
-            if self.ffmpeg_bin:
-                self.check_ffmpeg_seek_problem()
-            self.load_state()
-            self.ui.loading.hide()
-            self.state_loaded = True
-
-        self.player_loaded.connect(on_player_loaded)
-
-        def on_playback_len(s):
-            self.playback_len = s
-            player.unobserve_property('duration', on_playback_len)
-
-        def on_playback_pos(s):
-            if self.playback_pos is None:
-                self.player_loaded.emit()
-            self.playback_pos = s
-            self.statusbar_update.emit()
-            self.ui.seekbar.update()
-
-        player.observe_property('time-pos', on_playback_pos)
-        player.observe_property('duration', on_playback_len)
-        player.play(self.filename)
-
+        
     # Keyboard events #############################################################################
     ###############################################################################################
 
@@ -632,16 +695,6 @@ class GUI(QtWidgets.QDialog):
 
         if i is not None:
             self.player.seek(anchors[i], 'absolute', 'exact')
-
-    def to_next_keyframe(self, backwards=False):
-        if not self.ipts:
-            self.print('Couldn\'t get keyframes information')
-            return
-
-        i = sidesi(self.playback_pos, self.ipts, min_diff=1/self.player.fps)[0 if backwards else 1]
-
-        if i is not None:
-            self.player.seek(self.ipts[i], 'absolute', 'exact')
 
     def keyPressEvent(self, event):
         k = event.key()
@@ -661,17 +714,6 @@ class GUI(QtWidgets.QDialog):
             except ImportError:
                 import pdb
                 pdb.set_trace()
-
-        elif k == Qt.Key_O:
-
-            outfile = self.get_user_ffmpeg_args()[0]
-            try:
-                if not ctrl:
-                    default_open(outfile)
-                else:
-                    default_open(os.path.split(outfile)[0] or '.')
-            except Exception as e:
-                self.print_error(e)
 
         elif k == Qt.Key_Escape:
 
@@ -693,72 +735,46 @@ class GUI(QtWidgets.QDialog):
         ################################
 
         if k == Qt.Key_Space:
-
             self.player.pause = not self.player.pause
 
-        elif k == Qt.Key_BracketRight:
-
-            self.player.command('add', 'chapter', 1)
-
-        elif k == Qt.Key_BracketLeft:
-
-            self.player.command('add', 'chapter', -1)
-
         elif k == Qt.Key_Up:
-
             self.player.seek(5, 'relative-percent')
 
         elif k == Qt.Key_Down:
-
             self.player.seek(-5, 'relative-percent')
 
         elif k == Qt.Key_Left:
-
             if ctrl:
                 self.player.seek(-1, 'relative', 'exact')
             elif alt:
                 self.to_next_anchor(True)
-            elif shift:
-                self.keyframe_jumped = True
-                self.to_next_keyframe(True)
             else:
                 self.player.frame_back_step()
 
         elif k == Qt.Key_Right:
-
             if ctrl:
                 self.player.seek(1, 'relative', 'exact')
             elif alt:
                 self.to_next_anchor()
-            elif shift:
-                self.keyframe_jumped = True
-                self.to_next_keyframe()
             else:
                 self.player.frame_step()
 
         elif k == Qt.Key_Z:
-
             self.put_anchor()
 
         elif k == Qt.Key_X:
-
             self.del_anchor()
 
-        elif k == Qt.Key_K:
-
-            if not self.show_keyframes and not self.ipts:
-                self.print('No keyframes information.')
-            self.show_keyframes = not self.show_keyframes
-            self.ui.seekbar.update()
-
         elif k == Qt.Key_F:
-
             self.shifts_dialog_ui.a.setValue(self.ffmpeg_shift_a)
             self.shifts_dialog_ui.b.setValue(self.ffmpeg_shift_b)
             self.shifts_dialog.show()
 
         self.update_statusbar()
 
+    # anchor ######################################################################################
+    ###############################################################################################
+    
     def del_anchor(self):
         if self.closest_anchor == self.anchor:
             self.anchor = None
@@ -773,7 +789,6 @@ class GUI(QtWidgets.QDialog):
 
         self.print('> del, %s segments' % len(self.segments))
         self.print_segments()
-        self.save_state()
         self.ui.seekbar.update()
 
     def put_anchor(self, split_if_inside=True):
@@ -849,7 +864,6 @@ class GUI(QtWidgets.QDialog):
 
         print('put, move #%s, %s segments' % (move, len(self.segments)))
         self.print_segments()
-        self.save_state()
         self.ui.seekbar.update()
 
     # File state ##################################################################################
@@ -866,60 +880,8 @@ class GUI(QtWidgets.QDialog):
             'shifts': (self.ffmpeg_shift_a, self.ffmpeg_shift_b),
         }
 
-    def apply_state(self, state):
-        if state.get('mode') == 'keep':
-            self.ui.keep.setChecked(True)
-        elif state.get('mode') == 'remove':
-            self.ui.remove.setChecked(True)
-
-        for a, b in state.get('segments', []):
-            self.playback_pos = a
-            self.put_anchor()
-            self.playback_pos = b
-            self.put_anchor(split_if_inside=False)
-        self.playback_pos = 0
-
-        text = state.get('ffargs')
-        if text:
-            self.ui.argsEdit.setPlainText(text)
-
-        self.ui.encode.setChecked(state.get('encode', False))
-
-        self.ui.twoPass.setChecked(state.get('2-pass', False))
-        self.ui.twoPass.setEnabled(self.ui.encode.isChecked())
-
-        self.ffmpeg_shift_a, self.ffmpeg_shift_b = state.get('shifts', (0, 0))
-
-        self.anchor = state.get('anchor')
-
-        self.ui.seekbar.update()
-
-    def save_state(self):
-        try:
-            with open(self.save_filename, 'w') as f:
-                json.dump(self.get_state(), f, indent=True, sort_keys=True)
-        except IOError as e:
-            self.print_error(e)
-
-    def load_state(self):
-        if os.path.exists(self.save_filename):
-            try:
-                with open(self.save_filename) as f:
-                    state = json.load(f)
-                    self.apply_state(state)
-            except Exception:
-                self.print_error('Failed loading state file:')
-                traceback.print_exc()
-
     # Encoding ####################################################################################
     ###############################################################################################
-
-    def is_start(self, t):
-        return t == 0 or (self.pts and closest(t, self.pts) == self.pts[0])
-
-    def is_end(self, t):
-        return ((self.playback_len - t) < (1/self.player.fps) or
-                (self.pts and closest(t, self.pts) == self.pts[-1]))
 
     def get_inversed_segments(self):
         segments = []
@@ -929,41 +891,28 @@ class GUI(QtWidgets.QDialog):
             if i % 2 == 0: # a
                 if prev is None:
                     prev = 0
-
-                if not self.is_start(t):
-                    segments.append((prev, t))
             else: # b
                 prev = t
                 if i == len(anchors)-1:
                     if not self.is_end(t):
                         segments.append((t, self.playback_len))
         return segments
-
-    def adjust_segements(self, segments):
-
+    
+    def adjust_segments(self, segments):
         frame_duration = 1/self.player.fps
         keep = self.ui.keep.isChecked()
-        encode = self.ui.encode.isChecked()
 
         for i, seg in enumerate(segments):
             a, b = seg
-
             if keep:
                 b += frame_duration
             else:
-                a += frame_duration
-
+                a += frame_duration                
             a += frame_duration * self.ffmpeg_shift_a
             b += frame_duration * self.ffmpeg_shift_b
-
-            a = closest(a, self.pts, max_diff=frame_duration) or a
+            a = closest(a, self.pts, max_diff=frame_duration) or a 
             b = closest(b, self.pts, max_diff=frame_duration) or b
-
-            if self.is_start(a):
-                a = None
-            if self.is_end(b):
-                b = None
-
+           
             segments[i] = (a, b)
 
     def get_user_ffmpeg_args(self):
@@ -992,22 +941,16 @@ class GUI(QtWidgets.QDialog):
 
         return outfile, outargs, inargs
 
-    def make_ffmpeg(self):
 
+    # Run ffnoeg ##################################################################################
+    ###############################################################################################
+    
+    def make_ffmpeg(self):
         outfile, outargs, inargs = self.get_user_ffmpeg_args()
 
-        # Configurations ############################################
-        #############################################################
-
         path_name, ext = os.path.splitext(outfile)
-        just_name = os.path.split(path_name)[1]
         tmpfiles = []
         keep = self.ui.keep.isChecked()
-        encode = self.ui.encode.isChecked()
-        twoPass = self.ui.twoPass.isChecked()
-
-        # Compiling "encode segments to intermediate files" command #
-        #############################################################
 
         encode_commands = []
 
@@ -1016,88 +959,48 @@ class GUI(QtWidgets.QDialog):
         else:
             segments = self.get_inversed_segments()
 
-        self.adjust_segements(segments)
-
-        for _ in segments:
-            tmpfile = '%s.part%03d%s' % (path_name, len(tmpfiles), ext)
+        self.adjust_segments(segments)
+        
+        frame_duration = 1/self.player.fps
+        for segment in segments:
+            start, end = segment
+            if keep:
+                end -= frame_duration
+            else:
+                start -= frame_duration 
+            start = round(start/frame_duration)
+            end = round(end/frame_duration)
+            tmpfile = '%s.part%d-%d%s' % (path_name, start, end, ext)
+            tmpfile = os.path.join(self.save_file_path, tmpfile)
             tmpfiles.append(tmpfile)
 
-        # generate the commands
-
+        # generate the commands       
         ffmpeg = self.ffmpeg_bin or 'ffmpeg'
-
-        if not encode:
-
-            encode_command = [ffmpeg] + inargs + ['-i', self.filename, '-y']
-            for i, seg in enumerate(segments):
-                a, b = seg
-                encode_command += ['-ss', str(a), '-to', str(b), '-c', 'copy'] + outargs + [tmpfiles[i]]
-            encode_commands.append(encode_command)
-
-        elif twoPass:
-
-            passlogfiles = [os.path.join(self.tmpdir, tmpfile) for tmpfile in tmpfiles]
-
-            encode_command = [ffmpeg] + inargs + ['-i', self.filename, '-y']
-            for i, seg in enumerate(segments):
-                a, b = seg
-                if '-f' not in outargs:
-                    encode_command += ['-f', ext[1:].lower()]
-                encode_command += ['-ss', str(a), '-to', str(b), '-an', '-pass', '1', '-passlogfile', passlogfiles[i]] + outargs + [os.devnull]
-            encode_commands.append(encode_command)
-
-            encode_command = [ffmpeg] + inargs + ['-i', self.filename, '-y']
-            for i, seg in enumerate(segments):
-                a, b = seg
-                encode_command += ['-ss', str(a), '-to', str(b), '-pass', '2', '-passlogfile', passlogfiles[i]] + outargs + [tmpfiles[i]]
-            encode_commands.append(encode_command)
-
-        else:
-
-            encode_command = [ffmpeg] + inargs + ['-i', self.filename, '-y']
-            for i, seg in enumerate(segments):
-                a, b = seg
-                encode_command += ['-ss', str(a), '-to', str(b)] + outargs + [tmpfiles[i]]
-            encode_commands.append(encode_command)
-
-        # remove -ss for segments that begins from start and -t for segments that end on end
+        encode_command = [ffmpeg] + inargs + ['-i', self.filename, '-y']
+        for i, seg in enumerate(segments):
+            a, b = seg
+            encode_command += ['-ss', str(a), '-to', str(b), '-c', 'copy'] + outargs + [tmpfiles[i]]
+        encode_commands.append(encode_command)
 
         for cmd in encode_commands:
             while 'None' in cmd:
                 i = cmd.index('None')
                 cmd.pop(i)
                 cmd.pop(i-1)
-
-        # Compiling "concatenate intermediate files" command ########
-        #############################################################
-
-        list_file = os.path.join(self.tmpdir, just_name + ext + '.parts')
-        with open(list_file, 'w') as f:
-            for file in tmpfiles:
-                f.write('file \'%s\'\n' % os.path.abspath(file).replace("'", "'\\''"))
-
-        concat_command = [ffmpeg, '-f', 'concat', '-safe', '0', '-i', list_file, '-y', '-c', 'copy', outfile]
-
-        #############################################################
-
-        return encode_commands + [concat_command]
-
+        return encode_commands
+    
     def print_ffmpeg(self):
         self.print()
         for args in self.make_ffmpeg():
             self.print(' '.join(args))
         self.print()
 
-    def run_ffmpeg(self):
-        commands = self.make_ffmpeg()
+    def run_ffmpeg(self, commands = None):
+        if not commands :
+            commands = self.make_ffmpeg()
         commands_len = len(commands)
-
-        self.print()
-        for i, args in enumerate(commands, 1):
-            self.print(i, ' '.join(args))
-
         self._proc = None
-
+        
         def next_run():
             args = commands.pop(0)
             self.print()
@@ -1114,6 +1017,10 @@ class GUI(QtWidgets.QDialog):
                 self.interrupted = False
             elif exit_code == 0:
                 self.print('Done.')
+                self.ui.success = QtWidgets.QMessageBox()
+                self.ui.success.setWindowTitle('Success')
+                self.ui.success.setText('Successfully Save Files')
+                self.ui.success.exec()
             else:
                 self.print_error('Fail. Command exit code: %s' % exit_code)
 
@@ -1135,7 +1042,8 @@ class GUI(QtWidgets.QDialog):
         timer.setInterval(1000)
         timer.start()
         self.ui.run.setEnabled(False)
-
+        
+        
     # Bar #########################################################################################
     ###############################################################################################
 
@@ -1374,7 +1282,7 @@ def floor(number, ndigits=0):
         m = 10**ndigits
         return math.floor(number*m)/m
 
-
+#second가 현재 진행중인 초 format 만
 def format_time(seconds, full=False):
     l = ''
     s = seconds
@@ -1399,9 +1307,8 @@ def format_time(seconds, full=False):
     dec = s % 1
     if full or dec:
         l += ('%.3f' % dec)[1:]
-
+    
     return l
-
 
 def parse_time(string):
     parts = string.split(':')
@@ -1411,16 +1318,6 @@ def parse_time(string):
         return int(parts[0]) * 60 + float(parts[1])
     else:
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-
-
-def default_open(filepath):
-    if sys.platform.startswith('darwin'):
-        subprocess.Popen(('open', filepath), stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    elif os.name == 'nt':
-        os.startfile(filepath)
-    elif os.name == 'posix':
-        subprocess.Popen(('xdg-open', filepath), stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-
 
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
