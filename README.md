@@ -8,8 +8,6 @@ This program cut video frames and data files you want to cut</br>
 ## Usage
 __1.__ execute program</br>
 Click ffcutter.exe file</br>
-or</br>
-Go to directory containing ffcutter.exe and open cmd and execute ffcuttter</br></br>
 
 __2.__ load video file</br>
 Click open file button and load a video file</br>
