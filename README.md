@@ -1,34 +1,61 @@
-[WARNING] Partly broken, development on hold, needs total redesign, rewrite and simplification.
 
-### ffcutter
-Command line + gui utility to cut videos using ffmpeg. Analog of VirtualDub/Avidemux.
+# ffCutter
+ffCutter is  video cutter program. </br>
+This program cut video frames and data files you want to cut</br>
+</br>
+</br>
 
-![Screenshot](http://i.imgur.com/IwVuoMG.png)
+## Usage
+__1.__ execute program</br>
+Click ffcutter.exe file</br>
+or</br>
+Go to directory containing ffcutter.exe and open cmd and execute ffcuttter</br></br>
 
-### Installation
-##### Linux
-```
-> apt-get install ffmpeg mpv python3-pyqt5 python3-docopt python3-colorama
-or
-> yum install ffmpeg mpv python3-pyqt5 python3-docopt python3-colorama
-or
-> pacman -S ffmpeg mpv python-pyqt5 python-docopt python-colorama
-then
-> git clone https://github.com/Unknowny/ffcutter.git
-```
-Python dependencies can also be installed with `pip install pyqt5 docopt colorama`.  
-FFmpeg may not be available in default repositories. Refer to the [ffmpeg download page](https://ffmpeg.org/download.html#build-linux).
+__2.__ load video file</br>
+Click open file button and load a video file</br>
+or</br>
+Load a text file containing informations about videos and frames you want to cut</br>
+If you load text file, ffcutter automatically performs step 3 and step 4.</br></br>
 
-##### Windows
-Latest all included x86_64 only archive is available in [releases](https://github.com/Unknowny/ffcutter/releases).  
-Run ffcutter.exe from terminal or drop video file into it. Press H to print help message to the terminal.  
-If you encounter ucrtbase.terminate error install this windows update - [KB2999226](https://www.microsoft.com/en-us/download/details.aspx?id=49093).
+__3.__ set scenes you want to cut</br>
+Drop an anchor by pressing the z key</br></br>
 
-Alternatively you can install all the dependacies manually, then place ffmpeg.exe, ffprobe.exe, [mpv-1.dll](https://github.com/Unknowny/ffcutter/blob/master/win/mpv-1.dll), [D3DCompiler_43.dll](https://github.com/Unknowny/ffcutter/blob/master/win/D3DCompiler_43.dll) next to ffcutter.py. 
+__4.__ save the scenes</br>
+Click run button </br></br>
+
+## Form Of Text File
+__form of text file__</br>
+input video directory | output video directory | start framenum | end framenum</br></br>
+if you give a input video directory as a video file, ffcutter will cut only video file
+if you give a input video directory as a path, ffcutter will cut video file and data files
+__example of text file__</br>
+.\data1\Test_1.mp4 .\video_light 3 5</br>
+.\data3\Test_3.mp4 .\video_darkness 1 2</br>
+.\data3 .\video_data_darkness 10 13</br></br>
 
 
-### Usage
-```
-> ffcutter.py <video-file> [-s <save-file> --mpv=mpv-option...]
-> ffcutter.py -h | --help
-```
+## Manual
+__Usage__</br>
+    ffcutter</br>
+    ffcutter -h | --help</br></br>
+
+__Examples__</br>
+    ffcutter</br></br>
+
+__GUI keys__</br>
+GUI keys:
+space - Play/pause.
+arrows - Step frames.
+ctrl + arrows - Step seconds.
+alt + arrows - Jump anchors.
+up/down arrows - Step 5%.
+
+z - Put anchor on the current playback position.
+x - Remove highlighted anchor.
+
+h - Print this help message to the terminal.
+i - Print input file information to the terminal.
+
+ctrl + o - Open its directory.
+
+f - Input frame start/end shift which will be applied to all segments during encoding / stream copy.
